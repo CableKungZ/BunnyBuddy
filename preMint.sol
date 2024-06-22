@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-contract Context {
-    function _msgSender() internal view virtual returns (address) {
-        return msg.sender;
-    }
-    
-    function _msgData() internal view virtual returns (bytes calldata) {
-        return msg.data;
-    }
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
-contract Ownable is Context {
+contract Ownable {
     address private _owner;
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     constructor() {
-        _transferOwnership(_msgSender());
+        _transferOwnership(msg.sender);
     }
 
     function owner() public view returns (address) {
@@ -25,7 +26,7 @@ contract Ownable is Context {
     }
 
     modifier onlyOwner() {
-        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        require(owner() == msg.sender, "Ownable: caller is not the owner");
         _;
     }
 
@@ -41,109 +42,49 @@ contract Ownable is Context {
     }
 }
 
-interface IERC20 {
-    function totalSupply() external view returns (uint256);
-    function balanceOf(address account) external view returns (uint256);
-    function transfer(address recipient, uint256 amount) external returns (bool);
-    function allowance(address owner, address spender) external view returns (uint256);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
-
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
-}
-
-contract PreMint is Ownable {
-    struct PreMintData {
-        address premintToken;
+contract PresaleToken is Ownable {
+    struct Presale {
+        address presaleToken;
         address buyToken;
-        uint256 premintAmount; // ratio: number of premint tokens per buy token
-        uint256 buyAmount;     // ratio: number of buy tokens for premint tokens
-        uint256 totalBuy;
+        uint256 price;
         uint256 remaining;
-        bool paused;
-        address receiveAddress; // address to receive buyToken
     }
 
-    PreMintData[] public preMints;
+    mapping(uint256 => Presale) public presaleList;
+    uint256 public presaleCount;
 
-    event PreMintAdded(uint256 indexed preMintID, address premintToken, address buyToken, uint256 premintAmount, uint256 buyAmount, uint256 totalBuy, address receiveAddress);
-    event PreMintPaused(uint256 indexed preMintID, bool paused);
-    event TokensBought(uint256 indexed preMintID, address indexed buyer, uint256 buyAmount, uint256 premintAmount);
+    event PresaleSet(uint256 indexed presaleIndex, address presaleToken, address buyToken, uint256 price, uint256 remaining);
+    event TokenBought(uint256 indexed presaleIndex, address indexed buyer, uint256 amount);
+    event TokenWithdrawn(uint256 indexed presaleIndex, uint256 amount);
 
-    function addPreMint(
-        address _premintToken,
-        address _buyToken,
-        uint256 _premintAmount,
-        uint256 _buyAmount,
-        uint256 _totalBuy,
-        address _receiveAddress,
-        uint256 _premintTokenAmount
-    ) external onlyOwner {
-        require(IERC20(_premintToken).transferFrom(msg.sender, address(this), _premintTokenAmount), "Premint token transfer failed");
-
-        preMints.push(PreMintData({
-            premintToken: _premintToken,
+    function setPresale(address _presaleToken, address _buyToken, uint256 _price, uint256 _remaining) external onlyOwner {
+        presaleList[presaleCount] = Presale({
+            presaleToken: _presaleToken,
             buyToken: _buyToken,
-            premintAmount: _premintAmount,
-            buyAmount: _buyAmount,
-            totalBuy: _totalBuy,
-            remaining: _totalBuy,
-            paused: false,
-            receiveAddress: _receiveAddress
-        }));
-
-        emit PreMintAdded(preMints.length - 1, _premintToken, _buyToken, _premintAmount, _buyAmount, _totalBuy, _receiveAddress);
+            price: _price,
+            remaining: _remaining
+        });
+        emit PresaleSet(presaleCount, _presaleToken, _buyToken, _price, _remaining);
+        presaleCount++;
     }
 
-    function pausePreMint(uint256 _preMintID, bool _paused) external onlyOwner {
-        require(_preMintID < preMints.length, "Invalid PreMint ID");
-        preMints[_preMintID].paused = _paused;
+    function buy(uint256 _presaleIndex, uint256 _presaleAmount) external {
+        Presale storage presale = presaleList[_presaleIndex];
+        require(presale.remaining >= _presaleAmount, "Not enough tokens remaining");
 
-        emit PreMintPaused(_preMintID, _paused);
+        uint256 cost = _presaleAmount * presale.price;
+        require(IERC20(presale.buyToken).transferFrom(msg.sender, address(this), cost), "Payment failed");
+
+        presale.remaining -= _presaleAmount;
+        require(IERC20(presale.presaleToken).transfer(msg.sender, _presaleAmount), "Token transfer failed");
+
+        emit TokenBought(_presaleIndex, msg.sender, _presaleAmount);
     }
 
-    function buyTokens(uint256 _preMintID, uint256 _buyTokenAmount) external {
-        require(_preMintID < preMints.length, "Invalid PreMint ID");
-        PreMintData storage preMint = preMints[_preMintID];
+    function withdrawToken(uint256 _presaleIndex, uint256 _amount) external onlyOwner {
+        Presale storage presale = presaleList[_presaleIndex];
+        require(IERC20(presale.presaleToken).transfer(msg.sender, _amount), "Token transfer failed");
 
-        require(!preMint.paused, "PreMint is paused");
-        require(preMint.remaining >= _buyTokenAmount, "Not enough tokens remaining");
-
-        uint256 premintTokenAmount = (_buyTokenAmount * preMint.premintAmount) / preMint.buyAmount;
-
-        require(IERC20(preMint.buyToken).transferFrom(msg.sender, preMint.receiveAddress, _buyTokenAmount), "Buy token transfer failed");
-        require(IERC20(preMint.premintToken).transfer(msg.sender, premintTokenAmount), "Premint token transfer failed");
-
-        preMint.remaining -= _buyTokenAmount;
-
-        emit TokensBought(_preMintID, msg.sender, _buyTokenAmount, premintTokenAmount);
-    }
-
-    function getPreMintStatus(uint256 _preMintID) external view returns (
-        address premintToken,
-        address buyToken,
-        uint256 premintAmount,
-        uint256 buyAmount,
-        uint256 remaining,
-        bool buyable,
-        address receiveAddress
-    ) {
-        require(_preMintID < preMints.length, "Invalid PreMint ID");
-        PreMintData storage preMint = preMints[_preMintID];
-
-        return (
-            preMint.premintToken,
-            preMint.buyToken,
-            preMint.premintAmount,
-            preMint.buyAmount,
-            preMint.remaining,
-            !preMint.paused && preMint.remaining > 0,
-            preMint.receiveAddress
-        );
-    }
-
-    function getPreMintLength() external view returns (uint256) {
-        return preMints.length;
+        emit TokenWithdrawn(_presaleIndex, _amount);
     }
 }
